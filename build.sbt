@@ -1,4 +1,4 @@
-name := "sarplus"
+name := "sarscala"
 
 version := "0.1"
 

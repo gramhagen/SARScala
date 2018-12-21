@@ -5,7 +5,8 @@ import org.apache.spark.ml.param.shared.HasPredictionCol
 import org.apache.spark.ml.param._
 import org.apache.spark.ml.util._
 import org.apache.spark.ml.{Estimator, Model}
-import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.expressions.Window
+import org.apache.spark.sql.functions.{col, row_number}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
 
@@ -13,9 +14,9 @@ import scala.collection.mutable
 
 
 /**
-  * Common params for SARPlus Model.
+  * Common params for SARScala Model.
   */
-trait SARPlusModelParams extends Params with HasPredictionCol {
+trait SARScalaModelParams extends Params with HasPredictionCol {
 
   /** @group param */
   val userCol = new Param[String](this, "userCol", "column name for user ids. all ids must be integers.")
@@ -41,10 +42,10 @@ trait SARPlusModelParams extends Params with HasPredictionCol {
   *
   * @param itemSimilarity continuous index-mapped item similarity matrix
   */
-class SARPlusModel (
+class SARScalaModel (
   override val uid: String,
   @transient val itemSimilarity: DataFrame)
-  extends Model[SARPlusModel] with SARPlusModelParams with MLWritable {
+  extends Model[SARScalaModel] with SARScalaModelParams with MLWritable {
 
   /** @group setParam */
   def setUserCol(value: String): this.type = set(userCol, value)
@@ -58,27 +59,43 @@ class SARPlusModel (
   /** @group setParam */
   def setPredictionCol(value: String): this.type = set(predictionCol, value)
 
-  def getMappedArrays: Map[String, Array[_]] = {
-    val itemCountsBuffer = new mutable.ArrayBuilder.ofLong
-    val itemIdsBuffer = new mutable.ArrayBuilder.ofInt
-    val itemValuesBuffer = new mutable.ArrayBuilder.ofDouble
+  def getMappedArrays: (Array[Long], Array[Int], Array[Double]) = {
 
-    itemSimilarity.groupBy("i1")
+    val itemCountsBuffer = new mutable.ArrayBuilder.ofLong
+    itemSimilarity.groupBy(col("i1"))
       .count()
-      .orderBy(("i1"))
+      .orderBy(col("i1"))
+      .collect()
       .foreach((r: Row) => {
         itemCountsBuffer += r.getAs[Long]("count")
-    })
+      })
 
-    itemSimilarity.orderBy(col("i1"))
+    val itemMapping = itemSimilarity.select("i1")
+      .distinct()
+      .select(col("i1").as("i"),
+        (row_number().over(Window.orderBy(col("i1"))) - 1).as("idx"))
+      .repartition(col("i"))
+      .sortWithinPartitions()
+
+    val dfIS = itemSimilarity.as("dfIS")
+    val dfIM = itemMapping.as("dfIM")
+
+    val itemSimilarityMapped = dfIS.join(dfIM, dfIS.col("i2") === dfIM.col("i"))
+      .select(col("i1"), col("idx").as("i2"), col("value"))
+      .cache
+
+    val itemIdsBuffer = new mutable.ArrayBuilder.ofInt
+    val itemValuesBuffer = new mutable.ArrayBuilder.ofDouble
+    itemSimilarityMapped.orderBy(col("i1"))
+      .collect()
       .foreach((r: Row) => {
         itemIdsBuffer += r.getAs[Int]("i2")
         itemValuesBuffer += r.getAs[Double]("value")
     })
 
-    Map("itemSimilarityCounts" -> itemCountsBuffer.result,
-        "itemSimilarityIds" -> itemIdsBuffer.result,
-        "itemSimilarityValues" -> itemValuesBuffer.result)
+    (itemCountsBuffer.result,
+     itemIdsBuffer.result,
+     itemValuesBuffer.result)
   }
 
   override def transform(dataset: Dataset[_]): DataFrame = {
@@ -91,21 +108,21 @@ class SARPlusModel (
     StructType(schema.fields :+ StructField($(predictionCol), IntegerType, nullable = false))
   }
 
-  override def copy(extra: ParamMap): SARPlusModel = {
-    val copied = new SARPlusModel(uid, itemSimilarity)
+  override def copy(extra: ParamMap): SARScalaModel = {
+    val copied = new SARScalaModel(uid, itemSimilarity)
     copyValues(copied, extra).setParent(parent)
   }
 
-  override def write: MLWriter = new SARPlusModel.SARPlusModelWriter(this)
+  override def write: MLWriter = new SARScalaModel.SARScalaModelWriter(this)
 }
 
-object SARPlusModel extends MLReadable[SARPlusModel] {
+object SARScalaModel extends MLReadable[SARScalaModel] {
 
-  override def read: MLReader[SARPlusModel] = new SARPlusModelReader
+  override def read: MLReader[SARScalaModel] = new SARScalaModelReader
 
-  override def load(path: String): SARPlusModel = super.load(path)
+  override def load(path: String): SARScalaModel = super.load(path)
 
-  private[SARPlusModel] class SARPlusModelWriter(instance: SARPlusModel) extends MLWriter {
+  private[SARScalaModel] class SARScalaModelWriter(instance: SARScalaModel) extends MLWriter {
 
      override protected def saveImpl(path: String): Unit = {
        // FIXM: store uid properly
@@ -115,9 +132,9 @@ object SARPlusModel extends MLReadable[SARPlusModel] {
     }
   }
 
-  private class SARPlusModelReader extends MLReader[SARPlusModel] {
+  private class SARScalaModelReader extends MLReader[SARScalaModel] {
 
-    override def load(path: String): SARPlusModel = {
+    override def load(path: String): SARScalaModel = {
       // TODO: extend this to include more metadata
       val uidPath = new Path(path, "uid").toString
       val uid = sparkSession.read.format("string").load(uidPath).toString
@@ -125,14 +142,14 @@ object SARPlusModel extends MLReadable[SARPlusModel] {
       val itemSimilarityPath = new Path(path, "itemSimilarity").toString
       val itemSimilarity = sparkSession.read.format("parquet").load(itemSimilarityPath)
 
-      new SARPlusModel(uid, itemSimilarity)
+      new SARScalaModel(uid, itemSimilarity)
     }
   }
 }
 
-class SARPlus (override val uid: String) extends Estimator[SARPlusModel] with SARPlusModelParams {
+class SARScala (override val uid: String) extends Estimator[SARScalaModel] with SARScalaModelParams {
 
-  def this() = this(Identifiable.randomUID("sarplus"))
+  def this() = this(Identifiable.randomUID("SARScala"))
 
   /** @group setParam */
   def setUserCol(value: String): this.type = set(userCol, value)
@@ -146,7 +163,7 @@ class SARPlus (override val uid: String) extends Estimator[SARPlusModel] with SA
   /** @group setParam */
   def setPredictionCol(value: String): this.type = set(predictionCol, value)
 
-  override def fit(dataset: Dataset[_]): SARPlusModel = {
+  override def fit(dataset: Dataset[_]): SARScalaModel = {
 
     // first we count item-item co-occurrence
     val dfA = dataset.as("dfA")
@@ -183,12 +200,12 @@ class SARPlus (override val uid: String) extends Estimator[SARPlusModel] with SA
       .repartition(col("i1"))
       .sortWithinPartitions()
 
-    new SARPlusModel(uid, itemSimilarity)
+    new SARScalaModel(uid, itemSimilarity)
   }
 
   override def transformSchema(schema: StructType): StructType = {
     transformSchema(schema)
   }
 
-  override def copy(extra: ParamMap): SARPlus = defaultCopy(extra)
+  override def copy(extra: ParamMap): SARScala = defaultCopy(extra)
 }
