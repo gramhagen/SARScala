@@ -1,0 +1,14 @@
+target/
+out/
+project/
+
+.class
+.log
+.jar
+
+*.iml
+*.ipr
+*.iws
+.idea/
+
+**/.DS_Store
