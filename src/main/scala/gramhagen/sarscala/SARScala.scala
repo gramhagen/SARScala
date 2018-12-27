@@ -166,13 +166,15 @@ class SARScala (override val uid: String) extends Estimator[SARScalaModel] with 
   override def fit(dataset: Dataset[_]): SARScalaModel = {
 
     // first we count item-item co-occurrence
-    val dfA = dataset.as("dfA")
-    val dfB = dataset.as("dfB")
-    val itemCooccurrence = dfA.join(dfB, dfA.col($(userCol)) === dfB.col($(userCol)) && dfA.col($(itemCol)) === dfB.col($(itemCol)))
-      .groupBy(dfA.col($(itemCol)), dfB.col($(itemCol)))
+    val dfA = dataset.select(col($(userCol)).as("u1"), col($(itemCol)).as("i1"))
+    val dfB = dataset.select(col($(userCol)).as("u2"), col($(itemCol)).as("i2"))
+
+    val itemCooccurrence = dfA.join(dfB,
+         col("u1") <=> col("u2") && // take care of nulls w/ <=>
+         col("i1") <= col("i2"))
+      .groupBy(col("i1"), col("i2"))
       .count()
-      .filter(col("count") > 0)
-      .select(dfA.col($(itemCol)).as("i1"), dfB.col($(itemCol)).as("i2"), col("count"))
+      .filter(col("count") > 0) // TODO: implement threshold
       .repartition(col("i1"), col("i2"))
       .sortWithinPartitions()
 
@@ -184,7 +186,7 @@ class SARScala (override val uid: String) extends Estimator[SARScalaModel] with 
     val dfM = itemMarginal.as("dfM")
 
     // compute the Jaccard distance between items, this is symmetric so only compute the upper triangular
-    val dfICM = dfIC.join(dfM, dfIC.col("i1")   === dfM.col("i"))
+    val dfICM = dfIC.join(dfM, dfIC.col("i1") === dfM.col("i"))
       .select(dfIC.col("*"),
               (dfM.col("count") - dfIC.col("count")).as("i1_marginal"))
 
