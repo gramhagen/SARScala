@@ -44,7 +44,7 @@ trait SARScalaModelParams extends Params with HasPredictionCol {
   */
 class SARScalaModel (
   override val uid: String,
-  @transient val itemSimilarity: DataFrame)
+  @transient val itemSimilarity: Dataset[_])
   extends Model[SARScalaModel] with SARScalaModelParams with MLWritable {
 
   /** @group setParam */
@@ -61,39 +61,31 @@ class SARScalaModel (
 
   def getMappedArrays: (Array[Long], Array[Int], Array[Double]) = {
 
-    val itemCountsBuffer = new mutable.ArrayBuilder.ofLong
-    itemSimilarity.groupBy(col("i1"))
+    val itemCounts = itemSimilarity.groupBy("i1")
       .count()
-      .orderBy(col("i1"))
+      .orderBy("i1")
       .collect()
-      .foreach((r: Row) => {
-        itemCountsBuffer += r.getAs[Long]("count")
-      })
+      .map((r: Row) => r.getAs[Long]("count"))
 
-    val itemMapping = itemSimilarity.select("i1")
+    val itemMapping = itemSimilarity.select(col("i1").as("i"))
       .distinct()
-      .select(col("i1").as("i"),
-        (row_number().over(Window.orderBy(col("i1"))) - 1).as("idx"))
+      .select(col("i"),
+        (row_number().over(Window.orderBy(col("i"))) - 1).as("idx"))
       .repartition(col("i"))
       .sortWithinPartitions()
 
-    val dfIS = itemSimilarity.as("dfIS")
-    val dfIM = itemMapping.as("dfIM")
-
-    val itemSimilarityMapped = dfIS.join(dfIM, dfIS.col("i2") === dfIM.col("i"))
-      .select(col("i1"), col("idx").as("i2"), col("value"))
-      .cache
-
     val itemIdsBuffer = new mutable.ArrayBuilder.ofInt
     val itemValuesBuffer = new mutable.ArrayBuilder.ofDouble
-    itemSimilarityMapped.orderBy(col("i1"))
+    itemSimilarity.join(itemMapping, col("i2") === col("i"))
+      .select(col("i1"), col("idx").as("i2"), col("value"))
+      .orderBy("i1")
       .collect()
       .foreach((r: Row) => {
         itemIdsBuffer += r.getAs[Int]("i2")
         itemValuesBuffer += r.getAs[Double]("value")
     })
 
-    (itemCountsBuffer.result,
+    (itemCounts,
      itemIdsBuffer.result,
      itemValuesBuffer.result)
   }
@@ -163,44 +155,44 @@ class SARScala (override val uid: String) extends Estimator[SARScalaModel] with 
   /** @group setParam */
   def setPredictionCol(value: String): this.type = set(predictionCol, value)
 
-  override def fit(dataset: Dataset[_]): SARScalaModel = {
-
-    // first we count item-item co-occurrence
-    val dfA = dataset.select(col($(userCol)).as("u1"), col($(itemCol)).as("i1"))
-    val dfB = dataset.select(col($(userCol)).as("u2"), col($(itemCol)).as("i2"))
-
-    val itemCooccurrence = dfA.join(dfB,
-         col("u1") <=> col("u2") && // take care of nulls w/ <=>
-         col("i1") <= col("i2"))
+  def getItemCoOcurrence(df: Dataset[_]): Dataset[_] = {
+    df.select(col($(userCol)).as("u1"), col($(itemCol)).as("i1"))
+      .join(df.select(col($(userCol)).as("u2"), col($(itemCol)).as("i2")),
+        col("u1") <=> col("u2") && // remove nulls with <=>
+        col("i1") <= col("i2"))
       .groupBy(col("i1"), col("i2"))
       .count()
       .filter(col("count") > 0) // TODO: implement threshold
       .repartition(col("i1"), col("i2"))
       .sortWithinPartitions()
+  }
 
-    // next we count each item occurrence
-    val itemMarginal = itemCooccurrence.filter(col("i1") === col("i2"))
-      .select(col("i1").as("i"), col("count"))
+  def getItemSimilarity(df: Dataset[_], metric: String): Dataset[_] = {
+    // count each item occurrence
+    val itemCount = df.filter(col("i1") === col("i2"))
 
-    val dfIC = itemCooccurrence.as("dfIC")
-    val dfM = itemMarginal.as("dfM")
-
-    // compute the Jaccard distance between items, this is symmetric so only compute the upper triangular
-    val dfICM = dfIC.join(dfM, dfIC.col("i1") === dfM.col("i"))
-      .select(dfIC.col("*"),
-              (dfM.col("count") - dfIC.col("count")).as("i1_marginal"))
-
-    val itemSimilarityUpper = dfICM.join(dfM, dfICM.col("i2") === dfM.col("i"))
-      .select(dfICM.col("i1"),
-              dfICM.col("i2"),
-              (dfICM.col("count") / (dfICM.col("i1_marginal") + dfM.col("count"))).as("value"))
+    // compute upper triangular of the item-item similarity matrix using Jaccard distance between items
+    val upperTriangular = df.join(itemCount.select(col("i1"), col("count").as("i1_count")), "i1")
+      .select(col("i1"), col("i2"), col("count"),
+        (col("i1_count") - col("count")).as("i1_marginal"))
+      .join(itemCount.select(col("i2"), col("count").as("i2_count")), "i2")
+      .select(col("i1"), col("i2"),
+        (col("count") / (col("i1_marginal") + col("i2_count"))).as("value"))
 
     // fill in the lower triangular
-    val itemSimilarity = itemSimilarityUpper.union(
-        itemSimilarityUpper.filter(col("i1") =!= col("i2"))
-                           .select(col("i2"), col("i1"), col("value")))
+    upperTriangular.union(
+      upperTriangular.filter(col("i1") =!= col("i2"))
+        .select(col("i2"), col("i1"), col("value")))
       .repartition(col("i1"))
       .sortWithinPartitions()
+  }
+
+  override def fit(dataset: Dataset[_]): SARScalaModel = {
+
+    // first we count item-item co-occurrence
+    val itemCoOccurrence = getItemCoOcurrence(dataset)
+
+    val itemSimilarity = getItemSimilarity(itemCoOccurrence, "jaccard")
 
     new SARScalaModel(uid, itemSimilarity)
   }
