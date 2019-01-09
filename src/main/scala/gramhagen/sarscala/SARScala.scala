@@ -78,12 +78,12 @@ trait SARScalaParams extends SARScalaModelParams {
   * Model fitted by SAR
   *
   * @param itemSimilarity item similarity matrix
-  * @param userAffinity user affinity matrix
+  * @param processedRatings user affinity matrix
   */
 class SARScalaModel (
   override val uid: String,
   @transient val itemSimilarity: Dataset[_],
-  @transient val userAffinity: Dataset[_])
+  @transient val processedRatings: Dataset[_])
   extends Model[SARScalaModel] with SARScalaModelParams with MLWritable {
 
   /** @group setParam */
@@ -100,6 +100,16 @@ class SARScalaModel (
 
   /** @group setParam */
   def setPredictionCol(value: String): this.type = set(predictionCol, value)
+
+  def getUserAffinity(test_df: Dataset[_]): Dataset[_] = {
+    test_df.filter(col($(ratingCol)) > 0)
+      .select(col($(userCol)))
+      .distinct()
+      .join(processedRatings, Seq($(userCol)))
+      .select(col($(userCol)), col($(itemCol)), col($(ratingCol)))
+      .repartition(col($(userCol)), col($(itemCol)))
+      .sortWithinPartitions()
+  }
 
   def getMappedArrays: (Array[Long], Array[Int], Array[Double]) = {
 
@@ -142,7 +152,7 @@ class SARScalaModel (
   }
 
   override def copy(extra: ParamMap): SARScalaModel = {
-    new SARScalaModel(uid, itemSimilarity, userAffinity)
+    new SARScalaModel(uid, itemSimilarity, processedRatings)
       .setUserCol(getUserCol)
       .setItemCol(getItemCol)
       .setRatingCol(getRatingCol)
@@ -186,8 +196,8 @@ object SARScalaModel extends MLReadable[SARScalaModel] {
        val itemSimilarityPath = new Path(path, "itemSimilarity").toString
        instance.itemSimilarity.write.format("parquet").save(itemSimilarityPath)
 
-       val userAffinityPath = new Path(path, "userAffinity").toString
-       instance.userAffinity.write.format("parquet").save(userAffinityPath)
+       val processedRatingsPath = new Path(path, "processedRatings").toString
+       instance.processedRatings.write.format("parquet").save(processedRatingsPath)
     }
   }
 
@@ -200,10 +210,10 @@ object SARScalaModel extends MLReadable[SARScalaModel] {
       val itemSimilarityPath = new Path(path, "itemSimilarity").toString
       val itemSimilarity = sparkSession.read.format("parquet").load(itemSimilarityPath)
 
-      val userAffinityPath = new Path(path, "userAffinity").toString
-      val userAffinity = sparkSession.read.format("parquet").load(userAffinityPath)
+      val processedRatingsPath = new Path(path, "processedRatings").toString
+      val processedRatings = sparkSession.read.format("parquet").load(processedRatingsPath)
 
-      new SARScalaModel(metadata.getAs[String]("uid"), itemSimilarity, userAffinity)
+      new SARScalaModel(metadata.getAs[String]("uid"), itemSimilarity, processedRatings)
         .setUserCol(metadata.getAs[String]("userCol"))
         .setItemCol(metadata.getAs[String]("itemCol"))
         .setRatingCol(metadata.getAs[String]("ratingCol"))
@@ -249,17 +259,6 @@ class SARScala (override val uid: String) extends Estimator[SARScalaModel] with 
 
   /** @group setParam */
   def setCountThreshold(value: Int): this.type = set(countThreshold, value)
-
-  def getUserAffinity(df: Dataset[_]): Dataset[_] = {
-    val user = df.filter(col($(ratingCol)) > 0)
-      .select(col($(userCol)).as("u1"), col($(itemCol)).as("i1"))
-
-    user.join(user.select(col("u1").as("u2"), col("i1")), "i1")
-      .groupBy(col("u1"), col("u2"))
-      .agg(f.sum(f.lit(1.0)).as("value"))
-      .repartition(col("u1"), col("u2"))
-      .sortWithinPartitions()
-  }
 
   def getItemCoOccurrence(df: Dataset[_]): Dataset[_] = {
     df.select(col($(userCol)).as("u1"), col($(itemCol)).as("i1"))
@@ -328,16 +327,13 @@ class SARScala (override val uid: String) extends Estimator[SARScalaModel] with 
     // apply time decay to ratings if necessary otherwise remove duplicates
     val processedRatings = getProcessedRatings(dataset)
 
-    // calculate user affinity
-    val userAffinity = getUserAffinity(processedRatings)
-
     // count item-item co-occurrence
     val itemCoOccurrence = getItemCoOccurrence(processedRatings)
 
     // calculate item-item similarity
     val itemSimilarity = getItemSimilarity(itemCoOccurrence)
 
-    new SARScalaModel(uid, itemSimilarity, userAffinity)
+    new SARScalaModel(uid, itemSimilarity, processedRatings)
   }
 
   override def transformSchema(schema: StructType): StructType = {

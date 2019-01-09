@@ -24,7 +24,8 @@ class SARScalaSpec extends fixture.FlatSpec {
       "getItemCoOccurrenceInput",
       "getItemSimilarityInput",
       "getUserAffinityInput",
-      "itemSimilarity")
+      "itemSimilarity",
+      "processedRatings")
 
     val data = dataFiles.map((name: String) => {
       (name, spark.sqlContext
@@ -272,28 +273,29 @@ class SARScalaSpec extends fixture.FlatSpec {
   it should "get user affinity" in { f =>
 
     val expected = Seq(
-      (1,1,4.0),
-      (1,2,2.0),
-      (1,3,3.0),
-      (2,1,2.0),
-      (2,2,6.0),
-      (2,3,2.0),
-      (3,1,3.0),
-      (3,2,2.0),
-      (3,3,3.0))
+      (1,1,0.007),
+      (1,2,0.004),
+      (1,3,0.008),
+      (1,4,0.018),
+      (2,1,0.004),
+      (2,2,0.008),
+      (2,7,0.002),
+      (2,8,0.018),
+      (2,9,0.040),
+      (2,10,0.090))
 
-    new SARScala()
+    new SARScalaModel("uid", f.data.apply("itemSimilarity"), f.data.apply("processedRatings"))
       .setUserCol("user")
       .setItemCol("item")
       .setRatingCol("rating")
       .getUserAffinity(f.data.apply("getUserAffinityInput"))
-      .orderBy("u1", "u2")
+      .orderBy("user", "item")
       .toDF()
       .collect()
       .zip(expected)
       .foreach({case(row, testValue) =>
-        assert(row.getAs[Int]("u1") === testValue._1)
-        assert(row.getAs[Int]("u2") === testValue._2)
-        assert(math.abs(row.getAs[Double]("value") - testValue._3) < 0.1)
+        assert(row.getAs[Int]("user") === testValue._1)
+        assert(row.getAs[Int]("item") === testValue._2)
+        assert(math.abs(row.getAs[Double]("rating") - testValue._3) < 0.1)
       })
   }}
