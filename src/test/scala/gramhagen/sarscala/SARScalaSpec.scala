@@ -61,6 +61,22 @@ class SARScalaSpec extends fixture.FlatSpec {
     assert(model.isInstanceOf[SARScalaModel])
   }
 
+  it should "marcozo" in { f =>
+
+    val sar = new SARScala()
+      .setUserCol("user")
+      .setItemCol("item")
+      .setRatingCol("rating")
+      .setTimeCol("time")
+    assert(sar.isInstanceOf[SARScala])
+
+    val data = f.data.apply("getProcessedRatingsInput")
+    val model = sar.fit(data)
+    assert(model.isInstanceOf[SARScalaModel])
+
+    val preds = model.transform(data)
+  }
+
   it should "calculate item co-occurrence" in { f =>
 
     val expected = Seq(

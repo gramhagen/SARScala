@@ -10,9 +10,11 @@ import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.{functions => f}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
+import org.apache.spark.sql.catalyst.encoders.RowEncoder
 
 import scala.collection.mutable
 
+case class UserAffinity(u1: Integer, i1: Integer, score: Float)
 
 /**
   * Common params for SARScala Model.
@@ -83,7 +85,7 @@ trait SARScalaParams extends SARScalaModelParams {
 class SARScalaModel (
   override val uid: String,
   @transient val itemSimilarity: Dataset[_],
-  @transient val userAffinity: Dataset[_])
+  @transient val userAffinity: DataFrame)
   extends Model[SARScalaModel] with SARScalaModelParams with MLWritable {
 
   /** @group setParam */
@@ -131,8 +133,126 @@ class SARScalaModel (
      itemValuesBuffer.result)
   }
 
+
   override def transform(dataset: Dataset[_]): DataFrame = {
     transformSchema(dataset.schema)
+
+    val (itemCounts, itemIds, itemValues) = getMappedArrays
+
+    println(itemCounts.deep.mkString(","))
+
+    userAffinity.show()
+
+    val schema = Seq(
+           StructField("u1", IntegerType, nullable = false),
+           StructField("i1", IntegerType, nullable = false),
+           StructField("itemCol", DoubleType, nullable = false))
+
+    import userAffinity.sqlContext.implicits._
+
+    // var encoder = RowEncoder(StructType(schema))
+
+    val result = userAffinity
+      //.map((r: Row) => UserAffinity(r.getInt(0), r.getInt(1), r.getFloat(2)))
+      .groupByKey(r => r.getInt(0)) // TODO: 0 is not ideal
+      .flatMapGroups((u1, rowsForEach) => {
+        val list1 = scala.collection.mutable.ListBuffer[UserAffinity]()
+        list1.append(UserAffinity(u1,2,1.2f))
+        // Iterable(UserAffinity(1,2,1.2f))
+        list1
+      })
+      .toDF
+      //.groupByKey((ua: Row) => ua.u1)
+      //.flatMapGroups((u1:Integer, rowsForEach) => {
+      //  val list1 = scala.collection.mutable.ListBuffer[Row]()
+      // list1
+      //}, encoder)
+      //.toDF
+      // .groupBy(col("u1"))
+      //.groupByKey(_.get(0)) // TODO: 0 is not ideal
+      // .groupByKey(_ => 1) // TODO: 0 is not ideal 
+      /*
+      .flatMapGroups((u1, rowsForEach) => {
+        val list1 = scala.collection.mutable.ListBuffer[Row]()
+        // for (elem <- rowsForEach) {
+         //  list1.append(Row(1, 2, 1.2))
+        // }
+        // list1
+        // var list1:List[Row] = List()
+        // list1 :+ Row(1, 2, 1.2)
+        list1
+      }, encoder).toDF
+*/
+    //println(result.schema)
+
+    result.show()
+/*
+ def recommend() : Any = {
+        // parameters
+        val itemsOfUsers // TODO: vector<int32_t> type -> array?
+        val ratings // TODO: vector<float> 
+        val top_k = 10 // TODO: method vs global parameter?
+        val remove_seen = true // TODO: method vs global parameter?
+
+        // TODO handle empty users
+        
+        // TODO sort itemsOfUsers + ratings in parallel by itemId
+        val sortedItemIdsAndRatings;
+
+        val seen_items // TODO: hash_set<int32_t>
+        if (remove_seen) {
+            // TODO: add all itemsOfUser to seen_items
+        }
+
+        val top_k_items // TODO: priority_queue<item, score> sorted desc by score        
+
+        // TODO: loop syntax?
+        for itemId : itemsOfUser  {
+
+            relatedIdxBegin = offsets[itemId]
+            relatedIdxEnd = offsets[itemId + 1]
+
+            // loop through items user has seen
+            for (val i = relatedIdxBegin; i<relatedIdxEnd; i++) {
+
+                val relatedItemId = related[i]
+
+                if (top_k_items.contains(relatedItemId))
+                    continue
+                
+                top_k_items.add(relatedItemId)
+
+                val relatedItemScore = joinProdSum(sortedItemIdsAndRatings, relatedItemId)
+
+                if (relatedItemScore > 0)
+                    pushIfBetter(top_k_items, relatedItemId, relatedItemScore, top_k)
+            }
+        }
+        
+        // TODO: empty the top_k_items
+        return predictions
+    }
+
+    // TODO: private
+    def pushIfBetter() : Float = {
+        if (topKItems.size() < topK)
+            topKItems.add(itemIdAndScore)
+
+        if (topKItems.top().score < itemIdAndScore.score) {
+            topKItems.pop()
+            topKItems.push(itemIdAndScore)
+        }
+    }
+
+    def joinProdSum(relatedItemId) : Float = {
+        val contribIdxBegin = offset[relatedItemId]
+        val contribIdxEnd = offset[relatedItemId + 1]
+
+        val score = 0.;
+
+        val userIndex
+    }*/
+    // TODO: add scoring here!
     dataset.select(dataset("*"))
   }
 
@@ -250,14 +370,15 @@ class SARScala (override val uid: String) extends Estimator[SARScalaModel] with 
   /** @group setParam */
   def setCountThreshold(value: Int): this.type = set(countThreshold, value)
 
-  def getUserAffinity(df: Dataset[_]): Dataset[_] = {
+  def getUserAffinity(df: Dataset[_]): DataFrame = {
     val user = df.filter(col($(ratingCol)) > 0)
       .select(col($(userCol)).as("u1"), col($(itemCol)).as("i1"))
 
-    user.join(user.select(col("u1").as("u2"), col("i1")), "i1")
-      .groupBy(col("u1"), col("u2"))
+    // TODO: change this to original implementation
+    user.join(user.select(col("u1"), col("i1")), "i1")
+      .groupBy(col("u1"), col("i1"))
       .agg(f.sum(f.lit(1.0)).as("value"))
-      .repartition(col("u1"), col("u2"))
+      .repartition(col("u1"), col("i1"))
       .sortWithinPartitions()
   }
 
