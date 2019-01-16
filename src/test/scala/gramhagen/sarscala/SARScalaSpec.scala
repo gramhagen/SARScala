@@ -359,7 +359,7 @@ class SARScalaSpec extends fixture.FlatSpec {
       .setItemCol("productId")
       .setRatingCol("rating")
       .setTimeCol("timestamp")
-      .setTimeDecay(true)
+      .setTimeDecay(false)
       .setDecayCoefficient(30)
       .setSimilarityMetric(similarityType)
       .fit(f.data.apply("demoUsageWithRating"))
