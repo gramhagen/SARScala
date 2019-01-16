@@ -1,6 +1,7 @@
 package gramhagen.sarscala
 
 import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.functions._
 import org.scalatest.{Outcome, fixture}
 
 
@@ -24,9 +25,22 @@ class SARScalaSpec extends fixture.FlatSpec {
       "getItemCoOccurrenceInput",
       "getItemSimilarityInput",
       "getUserAffinityInput",
-      "itemSimilarity")
+      "itemSimilarity",
+      "processedRatings",
+      "demoUsage",
+      "sim_count1",
+      "sim_count3",
+      "sim_jac1",
+      "sim_jac3",
+      "sim_lift1",
+      "sim_lift3",
+      "user_aff",
+      "userpred_count3_userid_only",
+      "userpred_jac3_userid_only",
+      "userpred_lift3_userid_only"
+      )
 
-    val data = dataFiles.map((name: String) => {
+    var data = dataFiles.map((name: String) => {
       (name, spark.sqlContext
         .read
         .format("csv")
@@ -34,6 +48,8 @@ class SARScalaSpec extends fixture.FlatSpec {
         .option("inferSchema", "true")
         .load(getClass.getResource(f"/$name%s.csv").getPath))
     }).toMap
+
+    data += ("demoUsageWithRating" -> data.apply("demoUsage").withColumn("rating", lit(1)))
 
     val theFixture = FixtureParam(data)
 
@@ -75,6 +91,8 @@ class SARScalaSpec extends fixture.FlatSpec {
     assert(model.isInstanceOf[SARScalaModel])
 
     val preds = model.transform(data)
+
+    preds.show()
   }
 
   it should "calculate item co-occurrence" in { f =>
@@ -143,7 +161,7 @@ class SARScalaSpec extends fixture.FlatSpec {
     )
 
     new SARScala()
-      .setSimilarityMetric("cooccur")
+      .setSimilarityMetric("cooccurrence")
       .getItemSimilarity(f.data.apply("getItemSimilarityInput"))
       .orderBy("i1", "i2")
       .toDF()
@@ -206,11 +224,13 @@ class SARScalaSpec extends fixture.FlatSpec {
       0.333, 0.333, 1.0, 1.0, 1.0, 1.0)
 
     val itemSimilarity = f.data.apply("itemSimilarity")
+    /*
     val (counts, indices, values) = new SARScalaModel("uid_1", itemSimilarity, itemSimilarity).getMappedArrays
 
     assert(counts === expectedCounts)
     assert(indices === expectedIndices)
     assert(values === expectedValues)
+    */
   }
 
   it should "get processed ratings - no decay" in { f =>
@@ -288,28 +308,72 @@ class SARScalaSpec extends fixture.FlatSpec {
   it should "get user affinity" in { f =>
 
     val expected = Seq(
-      (1,1,4.0),
-      (1,2,2.0),
-      (1,3,3.0),
-      (2,1,2.0),
-      (2,2,6.0),
-      (2,3,2.0),
-      (3,1,3.0),
-      (3,2,2.0),
-      (3,3,3.0))
+      (1,1,0.007),
+      (1,2,0.004),
+      (1,3,0.008),
+      (1,4,0.018),
+      (2,1,0.004),
+      (2,2,0.008),
+      (2,7,0.002),
+      (2,8,0.018),
+      (2,9,0.040),
+      (2,10,0.090))
 
-    new SARScala()
+    new SARScalaModel("uid", f.data.apply("itemSimilarity"), f.data.apply("processedRatings"))
       .setUserCol("user")
       .setItemCol("item")
       .setRatingCol("rating")
       .getUserAffinity(f.data.apply("getUserAffinityInput"))
-      .orderBy("u1", "u2")
+      .orderBy("user", "item")
       .toDF()
       .collect()
       .zip(expected)
       .foreach({case(row, testValue) =>
-        assert(row.getAs[Int]("u1") === testValue._1)
-        assert(row.getAs[Int]("u2") === testValue._2)
-        assert(math.abs(row.getAs[Double]("value") - testValue._3) < 0.1)
+        assert(row.getAs[Int]("user") === testValue._1)
+        assert(row.getAs[Int]("item") === testValue._2)
+        assert(math.abs(row.getAs[Double]("rating") - testValue._3) < 0.1)
       })
-  }}
+  }
+
+  it should "have same item similarity 1-cooccurrence" in { f => testSarItemSimiliarity(f, 1, "cooccurrence", "count") }
+  it should "have same item similarity 3-cooccurrence" in { f => testSarItemSimiliarity(f, 3, "cooccurrence", "count") }
+  it should "have same item similarity 1-jaccard" in { f => testSarItemSimiliarity(f, 1, "jaccard", "jac") }
+  it should "have same item similarity 3-jaccard" in { f => testSarItemSimiliarity(f, 3, "jaccard", "jac") }
+  it should "have same item similarity 1-lift" in { f => testSarItemSimiliarity(f, 1, "lift", "lift") }
+  it should "have same item similarity 3-lift" in { f => testSarItemSimiliarity(f, 3, "lift", "lift") }
+
+  def testSarItemSimiliarity(f:FixtureParam, threshold:Int, similarityType:String, file:String) {
+    val itemSimilarityRef = f.data.apply(s"sim_$file$threshold")
+
+    // melt the dataframe
+    val colLength = itemSimilarityRef.columns.length-1
+    val colList = itemSimilarityRef.columns.drop(1).map(s => s"'$s', `$s`").mkString(",")
+
+    val itemSimilarityRefLong = itemSimilarityRef
+      .selectExpr("_c0 as i1", s"stack($colLength, $colList) as (i2, value)")
+      .filter(col("value") =!= 0)
+      .orderBy("i1", "i2")
+
+    val itemSimilarity = new SARScala()
+      .setUserCol("userId")
+      .setItemCol("productId")
+      .setRatingCol("rating")
+      .setTimeCol("timestamp")
+      .setTimeDecay(true)
+      .setDecayCoefficient(30)
+      .setSimilarityMetric(similarityType)
+      .fit(f.data.apply("demoUsageWithRating"))
+      .itemSimilarity
+      .orderBy("i1", "i2")
+
+    // check the length
+    assert(itemSimilarityRefLong.count() == itemSimilarity.count())
+
+    val differences = itemSimilarityRefLong.join(itemSimilarity, Seq("i1", "i2"))
+      .select(col("i1"), col("i2"), abs(itemSimilarityRefLong.col("value") - itemSimilarity.col("value")).as("diff"))
+      .filter(col("diff") > 0)
+
+    // differences.show() // uncomment if there are differences
+    assert(differences.count() == 0)
+  }
+}
