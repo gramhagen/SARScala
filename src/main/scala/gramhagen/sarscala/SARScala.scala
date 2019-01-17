@@ -118,7 +118,7 @@ class SARScalaModel (
       .select(col($(userCol)))
       .distinct()
       .join(processedRatings, Seq($(userCol)))
-      .select(col($(userCol)), col($(itemCol)), col($(ratingCol)))
+      .select(col($(userCol)), col($(itemCol)), col($(ratingCol)).as("value"))
       .repartition(col($(userCol)), col($(itemCol)))
       .sortWithinPartitions()
   }

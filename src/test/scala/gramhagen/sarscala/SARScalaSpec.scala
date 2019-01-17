@@ -2,10 +2,14 @@ package gramhagen.sarscala
 
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types.DoubleType
 import org.scalatest.{Outcome, fixture}
 
 
 class SARScalaSpec extends fixture.FlatSpec {
+
+  val ATOL = 1e-8
+  val TEST_USER = "0003000098E85347"
 
   case class FixtureParam(data: Map[String, DataFrame])
 
@@ -170,7 +174,7 @@ class SARScalaSpec extends fixture.FlatSpec {
       .foreach({case(row, testValue) =>
         assert(row.getAs[Int]("i1") === testValue._1)
         assert(row.getAs[Int]("i2") === testValue._2)
-        assert(math.abs(row.getAs[Double]("value") - testValue._3) < 0.1)
+        assert(math.abs(row.getAs[Double]("value") - testValue._3) < ATOL)
       })
   }
 
@@ -196,7 +200,7 @@ class SARScalaSpec extends fixture.FlatSpec {
       .foreach({case(row, testValue) =>
         assert(row.getAs[Int]("i1") === testValue._1)
         assert(row.getAs[Int]("i2") === testValue._2)
-        assert(math.abs(row.getAs[Double]("value") - testValue._3) < 0.1)
+        assert(math.abs(row.getAs[Double]("value") - testValue._3) < 0.05)
       })
   }
 
@@ -263,7 +267,7 @@ class SARScalaSpec extends fixture.FlatSpec {
       .foreach({case(row, testValue) =>
         assert(row.getAs[Int]("user") === testValue._1)
         assert(row.getAs[Int]("item") === testValue._2)
-        assert(math.abs(row.getAs[Double]("rating") - testValue._3) < 0.001)
+        assert(math.abs(row.getAs[Double]("rating") - testValue._3) < ATOL)
       })
   }
 
@@ -301,7 +305,7 @@ class SARScalaSpec extends fixture.FlatSpec {
         println(row)
         assert(row.getAs[Int]("user") === testValue._1)
         assert(row.getAs[Int]("item") === testValue._2)
-        assert(math.abs(row.getAs[Double]("rating") - testValue._3) < 0.001)
+        assert(math.abs(row.getAs[Double]("rating") - testValue._3) < 0.0005)
       })
   }
 
@@ -331,7 +335,7 @@ class SARScalaSpec extends fixture.FlatSpec {
       .foreach({case(row, testValue) =>
         assert(row.getAs[Int]("user") === testValue._1)
         assert(row.getAs[Int]("item") === testValue._2)
-        assert(math.abs(row.getAs[Double]("rating") - testValue._3) < 0.1)
+        assert(math.abs(row.getAs[Double]("value") - testValue._3) < ATOL)
       })
   }
 
@@ -369,9 +373,45 @@ class SARScalaSpec extends fixture.FlatSpec {
 
     val differences = itemSimilarityRefLong.join(itemSimilarity, Seq("i1", "i2"))
       .select(col("i1"), col("i2"), abs(itemSimilarityRefLong.col("value") - itemSimilarity.col("value")).as("diff"))
-      .filter(col("diff") > 1e-6)
+      .filter(col("diff") > ATOL)
 
     // differences.show() // uncomment if there are differences
     assert(differences.count() == 0)
   }
+
+  it should "have same user affinity" in { f =>
+    val testUsers = f.data.apply("demoUsageWithRating").filter(col("userId") === TEST_USER)
+    var userAffinityRef = f.data.apply("user_aff")
+
+    // melt the dataframe
+    val colLength = userAffinityRef.columns.length-1
+    val colList = userAffinityRef.columns.drop(1).map(s => s"'$s', `$s`").mkString(",")
+
+    // ensure all values are converted to double
+    for (column <- userAffinityRef.columns) {
+      userAffinityRef = userAffinityRef.withColumn(column, col(column).cast(DoubleType))
+    }
+    val userAffinityRefLong = userAffinityRef
+      .selectExpr("_c0 as userId", s"stack($colLength, $colList) as (productId, value)")
+      .filter(col("value") =!= 0)
+
+    val userAffinity = new SARScala()
+      .setUserCol("userId")
+      .setItemCol("productId")
+      .setRatingCol("rating")
+      .setTimeCol("timestamp")
+      .fit(f.data.apply("demoUsageWithRating"))
+      .getUserAffinity(testUsers)
+
+    assert(userAffinityRefLong.count() == userAffinity.count())
+
+    val differences = userAffinityRefLong.join(userAffinity, Seq("userId", "productId"))
+      .select(col("userId"), col("productId"), abs(userAffinityRefLong.col("value") - userAffinity.col("value")).as("diff"))
+      .filter(col("diff") > ATOL)
+
+    // differences.show() // uncomment if there are differences
+    assert(differences.count() == 0)
+
+  }
+
 }
