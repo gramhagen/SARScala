@@ -342,7 +342,7 @@ class SARScalaSpec extends fixture.FlatSpec {
   it should "have same item similarity 1-lift" in { f => testSarItemSimiliarity(f, 1, "lift", "lift") }
   it should "have same item similarity 3-lift" in { f => testSarItemSimiliarity(f, 3, "lift", "lift") }
 
-  def testSarItemSimiliarity(f:FixtureParam, threshold:Int, similarityType:String, file:String) {
+  def testSarItemSimiliarity(f:FixtureParam, threshold: Int, similarityType: String, file: String) {
     val itemSimilarityRef = f.data.apply(s"sim_$file$threshold")
 
     // melt the dataframe
@@ -359,19 +359,17 @@ class SARScalaSpec extends fixture.FlatSpec {
       .setItemCol("productId")
       .setRatingCol("rating")
       .setTimeCol("timestamp")
-      .setTimeDecay(false)
-      .setDecayCoefficient(30)
+      .setCountThreshold(threshold)
       .setSimilarityMetric(similarityType)
       .fit(f.data.apply("demoUsageWithRating"))
       .itemSimilarity
       .orderBy("i1", "i2")
 
-    // check the length
     assert(itemSimilarityRefLong.count() == itemSimilarity.count())
 
     val differences = itemSimilarityRefLong.join(itemSimilarity, Seq("i1", "i2"))
       .select(col("i1"), col("i2"), abs(itemSimilarityRefLong.col("value") - itemSimilarity.col("value")).as("diff"))
-      .filter(col("diff") > 0)
+      .filter(col("diff") > 1e-6)
 
     // differences.show() // uncomment if there are differences
     assert(differences.count() == 0)

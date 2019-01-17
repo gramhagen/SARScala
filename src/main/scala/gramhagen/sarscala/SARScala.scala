@@ -321,7 +321,7 @@ class SARScala (override val uid: String) extends Estimator[SARScalaModel] with 
         col("i1") <= col("i2"))
       .groupBy(col("i1"), col("i2"))
       .count()
-      .filter(col("count") > $(countThreshold))
+      .filter(col("count") >= $(countThreshold))
       .repartition(col("i1"), col("i2"))
       .sortWithinPartitions()
   }
@@ -333,7 +333,6 @@ class SARScala (override val uid: String) extends Estimator[SARScalaModel] with 
 
     // append marginal occurrence counts for each item
     val itemMarginal = df.join(itemCount.select(col("i1"), col("count").as("i1_count")), "i1")
-      .select(col("i1"), col("i2"), col("count"), col("i1_count"))
       .join(itemCount.select(col("i2"), col("count").as("i2_count")), "i2")
 
     // compute upper triangular of the item-item similarity matrix using desired metric between items
