@@ -176,7 +176,7 @@ class SARScalaModel (
 
     import processedRatings.sqlContext.implicits._
 
-      // filter processed ratings down to selected users
+    // filter processed ratings down to selected users
     val df = processedRatings
       .join(dataset.select($(userCol)).distinct(), $(userCol))
       .join(itemMapping, processedRatings.col($(itemCol)) <=> itemMapping.col("i2"))
