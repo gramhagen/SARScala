@@ -11,19 +11,20 @@ import org.apache.spark.sql.{functions => f}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
 import org.apache.spark.sql.catalyst.encoders.RowEncoder
+import org.apache.spark.api.java.function.MapFunction
 
 import scala.collection.mutable.{ArrayBuilder, HashSet, ListBuffer, PriorityQueue}
 import util.control.Breaks._
 import gramhagen.sarscala.SARExtensions._
 
-case class UserAffinity(u1: Int, i1: Int, score: Float)
+case class UserAffinity[T](u1: T, i1: Int, score: Float)
 
 case class ItemScore(id: Int, score: Float) extends Ordered[ItemScore] {
   // Required as of Scala 2.11 for reasons unknown - the companion to Ordered
   // should already be in implicit scope
   import scala.math.Ordered.orderingToOrdered
 
-  def compare(that: ItemScore): Int = this.score compare that.score
+  def compare(that: ItemScore): Int = -(this.score compare that.score)
 }
 
 /**
@@ -54,6 +55,13 @@ trait SARScalaModelParams extends Params with HasPredictionCol {
 
   /** @group param */
   def getTimeCol: String = $(timeCol)
+
+  /** @group param */
+  val topKCol = new Param[Int](this, "topK", "return top-k recommendations per user")
+
+  /** @group param */
+  def getTopKCol: Int = $(topKCol)
+
 }
 
 /**
@@ -113,7 +121,10 @@ class SARScalaModel (
   /** @group setParam */
   def setPredictionCol(value: String): this.type = set(predictionCol, value)
 
-  def getUserAffinity(test_df: Dataset[_]): Dataset[_] = {
+  /** @group setParam */
+  def setTopK(value: Int): this.type = set(topKCol, value)
+
+  def getUserAffinity(test_df: Dataset[_]): Dataset[_] = 
     test_df.filter(col($(ratingCol)) > 0)
       .select(col($(userCol)))
       .distinct()
@@ -121,34 +132,34 @@ class SARScalaModel (
       .select(col($(userCol)), col($(itemCol)), col($(ratingCol)).as("value"))
       .repartition(col($(userCol)), col($(itemCol)))
       .sortWithinPartitions()
-  }
 
-  def getMappedArrays: (DataFrame, Array[Long], Array[Int], Array[Double]) = {
+  def getMappedArrays: (DataFrame, Array[Int], Array[Int], Array[Float]) = {
 
     val itemOffsets = 
       itemSimilarity.groupBy("i1")
       .count()
       .orderBy("i1")
-      .select("count") // reduce amount transferred
+      .select(col("count").cast(IntegerType)) // reduce amount transferred
       .collect()
-      .map((r: Row) => r.getAs[Long]("count"))
-      .scanLeft(0L)(_+_) // cumulative sum to get to offsets
+      .map((r: Row) => r.getAs[Int]("count"))
+      .scanLeft(0)(_+_) // cumulative sum to get to offsets
 
-    val itemMapping = itemSimilarity.select(col("i2"))
+    val itemMapping =
+      itemSimilarity.select(col("i2"))
       .distinct()
       .select(col("i2"), (f.row_number().over(Window.orderBy("i2")) - 1).as("idx"))
       .repartition(col("i2"))
       .sortWithinPartitions()
 
     val itemIdsBuffer = new ArrayBuilder.ofInt
-    val itemValuesBuffer = new ArrayBuilder.ofDouble
+    val itemValuesBuffer = new ArrayBuilder.ofFloat
     itemSimilarity.join(itemMapping, "i2")
-      .select(col("i1"), col("idx").as("i2"), col("value"))
+      .select(col("i1"), col("idx").as("i2"), col("value").cast(FloatType))
       .orderBy("i1")
       .collect()
       .foreach((r: Row) => {
         itemIdsBuffer += r.getAs[Int]("i2")
-        itemValuesBuffer += r.getAs[Double]("value")
+        itemValuesBuffer += r.getAs[Float]("value")
     })
 
     (itemMapping,
@@ -157,42 +168,31 @@ class SARScalaModel (
      itemValuesBuffer.result)
   }
 
-
   override def transform(dataset: Dataset[_]): DataFrame = {
+
     transformSchema(dataset.schema)
 
     val (itemMapping, itemOffsets, itemIds, itemValues) = getMappedArrays
 
-    // println(itemOffsets.deep.mkString(","))
-    // processedRatings.show()
-/*
-    val schema = Seq(
-           StructField("u1", IntegerType, nullable = false),
-           StructField("i1", IntegerType, nullable = false),
-           StructField("itemCol", DoubleType, nullable = false))
-*/
     import processedRatings.sqlContext.implicits._
 
-/*
-    val colName = $(itemCol)
-    println(s"processedRatings: $colName")
-    processedRatings.show()
-*/
-    val result = processedRatings
+    // filter processed ratings down to selected users
+    val df = processedRatings
+      .join(dataset.select($(userCol)).distinct(), $(userCol))
       .join(itemMapping, processedRatings.col($(itemCol)) <=> itemMapping.col("i2"))
       .select(col($(userCol)), col("idx"), col($(ratingCol)).cast(FloatType))
-      .groupByKey(r => r.getInt(0)) // by user id
-      .flatMapGroups((u1, rowsForEach) => {
-        // TODO: switch to 2x array allocation instead of individual 
-        val userRatings = rowsForEach
-          .map(r => ItemScore(r.getInt(1), r.getFloat(2)))
-            .toArray
-            .sortWith(_.id < _.id)
 
-        new SARScalaPredictor(itemOffsets, itemIds, itemValues)
-          .predict(u1, userRatings)
-      })
-      .toDF
+    def getUserRatings(userItems:Iterator[Row]): Array[ItemScore] = 
+      userItems.map(r => ItemScore(r.getInt(1), r.getFloat(2)))
+        .toArray
+        .sortWith(_.id < _.id)
+ 
+    val result = df.schema(0).dataType match {
+      case DataTypes.LongType    => df.groupByKey(r => r.getLong(0))  .flatMapGroups((u1, rowsForEach) => new SARScalaPredictor(itemOffsets, itemIds, itemValues).predict(u1, getUserRatings(rowsForEach), $(topKCol))).toDF
+      case DataTypes.IntegerType => df.groupByKey(r => r.getInt(0))   .flatMapGroups((u1, rowsForEach) => new SARScalaPredictor(itemOffsets, itemIds, itemValues).predict(u1, getUserRatings(rowsForEach), $(topKCol))).toDF
+      case DataTypes.StringType  => df.groupByKey(r => r.getString(0)).flatMapGroups((u1, rowsForEach) => new SARScalaPredictor(itemOffsets, itemIds, itemValues).predict(u1, getUserRatings(rowsForEach), $(topKCol))).toDF
+      case _ => throw new IllegalArgumentException("DataType not supported");
+    }
 
     // map back to original item space
     // rename columns
@@ -330,16 +330,21 @@ class SARScala (override val uid: String) extends Estimator[SARScalaModel] with 
 
     // count each item occurrence
     val itemCount = df.filter(col("i1") === col("i2"))
+    // println("itemCount")
+    // itemCount.show()
 
     // append marginal occurrence counts for each item
-    val itemMarginal = df.join(itemCount.select(col("i1"), col("count").as("i1_count")), "i1")
-      .join(itemCount.select(col("i2"), col("count").as("i2_count")), "i2")
+    val itemMarginal = df
+      .join(itemCount.select(col("i1"), itemCount.col("count").as("i1_count")), "i1")
+      .join(itemCount.select(col("i2"), itemCount.col("count").as("i2_count")), "i2")
+
+    // itemMarginal.show()
 
     // compute upper triangular of the item-item similarity matrix using desired metric between items
     val upperTriangular = $(similarityMetric) match {
       case "cooccurrence" =>
           df.select(col("i1"), col("i2"), col("count").cast(DoubleType).as("value"))
-      case "jaccard" =>
+      case "jaccard" => 
         itemMarginal.select(col("i1"), col("i2"),
           (col("count") / (col("i1_count") + col("i2_count") - col("count"))).as("value"))
       case "lift" =>
@@ -384,7 +389,6 @@ class SARScala (override val uid: String) extends Estimator[SARScalaModel] with 
 
     // apply time decay to ratings if necessary otherwise remove duplicates
     val processedRatings = getProcessedRatings(dataset)
-
     // count item-item co-occurrence
     val itemCoOccurrence = getItemCoOccurrence(processedRatings)
 
@@ -396,6 +400,7 @@ class SARScala (override val uid: String) extends Estimator[SARScalaModel] with 
       .setItemCol($(itemCol))
       .setRatingCol($(ratingCol))
       .setTimeCol($(timeCol))
+      .setTopK(10)
   }
 
   override def transformSchema(schema: StructType): StructType = {

@@ -2,8 +2,9 @@ package gramhagen.sarscala
 
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types.DoubleType
+import org.apache.spark.sql.types._
 import org.scalatest.{Outcome, fixture}
+import scala.collection.immutable.Range
 
 
 class SARScalaSpec extends fixture.FlatSpec {
@@ -19,6 +20,7 @@ class SARScalaSpec extends fixture.FlatSpec {
       .appName("SARScalaSpec")
       .config("spark.sql.shuffle.partitions", value = 1)
       .config("spark.ui.enabled", value = false)
+      .config("spark.sql.crossJoin.enabled", value = true)
       .getOrCreate()
 
     spark.sparkContext.setLogLevel("ERROR")
@@ -41,7 +43,10 @@ class SARScalaSpec extends fixture.FlatSpec {
       "user_aff",
       "userpred_count3_userid_only",
       "userpred_jac3_userid_only",
-      "userpred_lift3_userid_only"
+      "userpred_lift3_userid_only",
+      "dummy",
+      "dummy-3-pred",
+      "dummy-3-input"
       )
 
     var data = dataFiles.map((name: String) => {
@@ -53,7 +58,14 @@ class SARScalaSpec extends fixture.FlatSpec {
         .load(getClass.getResource(f"/$name%s.csv").getPath))
     }).toMap
 
-    data += ("demoUsageWithRating" -> data.apply("demoUsage").withColumn("rating", lit(1)))
+    data += ("demoUsageWithRating" -> data.apply("demoUsage")
+        .select(
+            col("userId"),
+            col("productId"), 
+            to_timestamp(col("timestamp"), "yyyy/MM/dd'T'HH:mm:ss")
+              .cast(DataTypes.LongType)
+              .as("timestamp"),
+            lit(1).as("rating")))
 
     val theFixture = FixtureParam(data)
 
@@ -79,24 +91,6 @@ class SARScalaSpec extends fixture.FlatSpec {
 
     val model = sar.fit(f.data.apply("getProcessedRatingsInput"))
     assert(model.isInstanceOf[SARScalaModel])
-  }
-
-  it should "marcozo" in { f =>
-
-    val sar = new SARScala()
-      .setUserCol("user")
-      .setItemCol("item")
-      .setRatingCol("rating")
-      .setTimeCol("time")
-    assert(sar.isInstanceOf[SARScala])
-
-    val data = f.data.apply("getProcessedRatingsInput")
-    val model = sar.fit(data)
-    assert(model.isInstanceOf[SARScalaModel])
-
-    val preds = model.transform(data)
-
-    preds.show()
   }
 
   it should "calculate item co-occurrence" in { f =>
@@ -339,6 +333,7 @@ class SARScalaSpec extends fixture.FlatSpec {
       })
   }
 
+  // Tests 1-6
   it should "have same item similarity 1-cooccurrence" in { f => testSarItemSimiliarity(f, 1, "cooccurrence", "count") }
   it should "have same item similarity 3-cooccurrence" in { f => testSarItemSimiliarity(f, 3, "cooccurrence", "count") }
   it should "have same item similarity 1-jaccard" in { f => testSarItemSimiliarity(f, 1, "jaccard", "jac") }
@@ -411,7 +406,106 @@ class SARScalaSpec extends fixture.FlatSpec {
 
     // differences.show() // uncomment if there are differences
     assert(differences.count() == 0)
-
   }
 
+
+  // TODO: test 7
+
+  // Tests 8-10
+  it should "have same prediction 3-cooccurence" in { f => testSarUserPred(f, 3, "cooccurrence", "count") }
+  it should "have same prediction 3-jaccard" in     { f => testSarUserPred(f, 3, "jaccard", "jac") }
+  it should "have same prediction 3-lift" in        { f => testSarUserPred(f, 3, "lift", "lift") }
+
+  def testSarUserPred(f:FixtureParam, threshold: Int, similarityType: String, file: String) {
+    val demoUsage = f.data.apply("demoUsageWithRating")
+
+    val timeNow = demoUsage.agg(max(col("timestamp"))).head
+
+    // TODO: support timeNow
+
+    val model = new SARScala()
+      .setUserCol("userId")
+      .setItemCol("productId")
+      .setRatingCol("rating")
+      .setTimeCol("timestamp")
+      .setTimeDecay(true)
+      .setDecayCoefficient(30)
+      .setCountThreshold(threshold)
+      .setSimilarityMetric(similarityType)
+      .fit(demoUsage)
+
+    val reference = f.data.apply(s"userpred_${file}${threshold}_userid_only")
+    val expected = Range(1, 11)
+      .map(i => (reference.head.getString(i), reference.head.getDouble(i + 10)))
+      .toMap
+
+    /*
+    for ((k,v) <- expected)
+      println(s"$k: $v")
+    */
+    val refTuples = Range(1, 11).map(i => (reference.head.getString(i), reference.head.getDouble(i + 10)))
+
+    val preds = model.transform(demoUsage.filter(demoUsage.col("userID") <=> "0003000098E85347"))
+    // preds.orderBy("score").show()
+
+    import preds.sqlContext.implicits._
+
+    val comp = preds.map({ r => (r.getString(1), r.getFloat(2))}).collect.toMap
+
+    assert(comp.size == 10)
+
+    for ((item, score) <- comp) {
+      expected get item match {
+        case Some(scoreExpected) => {
+          val diff = Math.abs(scoreExpected - score)
+          if (diff >= 1e-5)
+            println(s"$item: $scoreExpected != $score")
+
+          assert(diff <= 1e-5)
+         }
+        case None => {
+          println(s"\tnot found: $item")
+          assert(false)
+        }
+      }
+     }
+
+    val missing = expected.keySet.filterNot(comp.keySet).mkString(",")
+    if (missing.length > 0)
+      println(s"missing: $missing")
+    assert(missing.length == 0)
+  }
+
+  it should "return correct preds for dummy dataset" in { f =>
+    // TODO: remove timestamp
+    val df = f.data.apply("dummy").withColumn("timestamp", lit(1))
+    // df.show()
+
+    val expected = f.data.apply("dummy-3-pred")
+    // expected.show()
+
+    val model = new SARScala()
+      .setUserCol("user")
+      .setItemCol("item")
+      .setRatingCol("rating")
+      .setTimeCol("timestamp") // TODO: ignore timeCol
+      .setTimeDecay(false)
+      .setCountThreshold(1)
+      .setSimilarityMetric("jaccard")
+      .fit(df)
+
+    val predInput = f.data.apply("dummy-3-input").withColumn("timestamp", lit(1))
+    // predInput.show()
+
+    // TODO: better way of doing this?
+    model.setTopK(3)
+
+    var actual = model.transform(predInput)
+    // actual.show()
+
+    // TODO: compare dataset
+  }
+  // def comparePredictions(actual:DataFrame, expected:DataFrame) = {
+     // val actualSorted = actual.orderBy("")
+  // }
 }
