@@ -16,8 +16,8 @@ object SARExtensions {
             val m = start + ((end - start) / 2)
 
             comparator(arr(m), value) match {
-                case c if c < 0 => searchIndex(m + 1, end, value, end, comparator)
-                case c if c > 0 => searchIndex(start, m, value, m, comparator)
+                case c if c < 0 => lowerBound(m + 1, end, value, end, comparator)
+                case c if c > 0 => lowerBound(start, m, value, m, comparator)
                 case _ => m
             }
         }
